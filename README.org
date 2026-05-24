@@ -1,0 +1,9 @@
+# xfocus
+
+A zoomer application inspired by Tsoding's [[https://github.com/tsoding/boomer][boomer]].
+
+I wanted to create such an implementation myself (without looking at Tsoding's program) for two purposes:
+1. I'll use it myself in day to day recordings
+2. For fun :)
+
+
