@@ -9,4 +9,7 @@ I wanted to create such an implementation myself (without looking at Tsoding's p
 * Usage
 - scroll wheel - control zoom
 - shift + scroll wheel - control spotlight
+- f - toggle screen freeze
+- s - save screenshot
+- mouse left button - start drawing (when frozen)
 
