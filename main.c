@@ -1,3 +1,5 @@
+#define GL_GLEXT_PROTOTYPES 1
+
 #include <GL/gl.h>
 #include <GL/glx.h>
 #include <X11/X.h>
@@ -8,6 +10,53 @@
 #include <stdlib.h>
 #include <sys/shm.h>
 #include <time.h>
+
+const char *vtx_src = "#version 120\n"
+                      "void main() {\n"
+                      "    gl_TexCoord[0] = gl_MultiTexCoord0;\n"
+                      "    gl_Position = ftransform();\n"
+                      "}\n";
+
+const char *frag_src =
+    "#version 120\n"
+    "uniform sampler2D tex;\n"
+    "uniform vec2 mouse;\n"
+    "uniform vec2 res;\n"
+    "uniform float zoom;\n"
+    "void main() {\n"
+    "    vec2 uv = gl_TexCoord[0].xy;\n"
+    "    vec2 m_uv = mouse / res;\n"
+    "    \n"
+    "    // Pull UV coordinates towards the mouse to zoom\n"
+    "    vec2 zoomed_uv = mix(m_uv, uv, 1.0 / zoom);\n"
+    "    vec4 color = texture2D(tex, zoomed_uv);\n"
+    "    \n"
+    "    // Calculate distance in real pixels for a perfect circle\n"
+    "    float dist = distance(uv * res, mouse);\n"
+    "    \n"
+    "    // Smooth transition between 150px and 200px from cursor\n"
+    "    float mask = smoothstep(150.0, 200.0, dist);\n"
+    "    \n"
+    "    // Darken everything outside the spotlight to 20% brightness\n"
+    "    vec4 dark = color * 0.2;\n"
+    "    gl_FragColor = mix(color, dark, mask);\n"
+    "}\n";
+
+GLuint compile_shader(const char *vtx, const char *frag) {
+  GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+  glShaderSource(vs, 1, &vtx, NULL);
+  glCompileShader(vs);
+
+  GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+  glShaderSource(fs, 1, &frag, NULL);
+  glCompileShader(fs);
+
+  GLuint prog = glCreateProgram();
+  glAttachShader(prog, vs);
+  glAttachShader(prog, fs);
+  glLinkProgram(prog);
+  return prog;
+}
 
 int main() {
   Display *d = XOpenDisplay(NULL);
@@ -35,7 +84,7 @@ int main() {
   attr.override_redirect = True;
   attr.background_pixel = BlackPixel(d, screen);
   attr.colormap = cmap;
-  attr.event_mask = KeyPressMask;
+  attr.event_mask = KeyPressMask | ButtonPressMask;
   attr.border_pixel = 0;
 
   if (!XShmQueryExtension(d)) {
@@ -89,6 +138,18 @@ int main() {
                GL_UNSIGNED_BYTE, img->data);
   glEnable(GL_TEXTURE_2D);
 
+  GLuint shader = compile_shader(vtx_src, frag_src);
+  glUseProgram(shader);
+
+  GLint loc_mouse = glGetUniformLocation(shader, "mouse");
+  GLint loc_res = glGetUniformLocation(shader, "res");
+  GLint loc_zoom = glGetUniformLocation(shader, "zoom");
+
+  glUniform2f(loc_res, (float)width, (float)height);
+
+  float current_zoom = 1.0f;
+  float target_zoom = 1.0f;
+
   XEvent ev;
   int running = 1;
   while (running) {
@@ -100,8 +161,27 @@ int main() {
         if (key == XK_q || key == XK_Escape) {
           running = 0;
         }
+      } else if (ev.type == ButtonPress) {
+        if (ev.xbutton.button == 4) {
+          target_zoom += 0.5f;
+          if (target_zoom > 10.0f) target_zoom = 10.0f;
+        } else if (ev.xbutton.button == 5) {
+          target_zoom -= 0.3f;
+          if (target_zoom < 1.0f) target_zoom = 1.0f;
+        }
       }
     }
+
+    Window root_ret, child_ret;
+    int root_x, root_y, win_x, win_y;
+    unsigned int mask;
+    XQueryPointer(d, root, &root_ret, &child_ret, &root_x, &root_y, &win_x,
+                  &win_y, &mask);
+
+    current_zoom += (target_zoom - current_zoom) * 0.08f;
+
+    glUniform2f(loc_mouse, (float)root_x, (float)root_y);
+    glUniform1f(loc_zoom, current_zoom);
 
     glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS);
@@ -116,6 +196,9 @@ int main() {
     glEnd();
 
     glXSwapBuffers(d, overlay);
+
+    struct timespec ts = {0, 8000000L};
+    nanosleep(&ts, NULL);
   }
 
   XUngrabKeyboard(d, CurrentTime);
