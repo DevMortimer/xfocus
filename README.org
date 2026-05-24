@@ -7,7 +7,6 @@ I wanted to create such an implementation myself (without looking at Tsoding's p
 2. For fun :)
 
 * Usage
-#+begin_quote
-scroll - control zoom
-shift + scroll - control spotlight
-#+end_quote
+- scroll wheel - control zoom
+- shift + scroll wheel - control spotlight
+
