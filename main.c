@@ -29,6 +29,7 @@ const char *vtx_src = "#version 120\n"
 const char *frag_src =
     "#version 120\n"
     "uniform sampler2D tex;\n"
+    "uniform vec2 camera;\n"
     "uniform vec2 mouse;\n"
     "uniform vec2 res;\n"
     "uniform float zoom;\n"
@@ -36,8 +37,9 @@ const char *frag_src =
     "void main() {\n"
     "    vec2 uv = gl_TexCoord[0].xy;\n"
     "    vec2 m_uv = mouse / res;\n"
+    "    vec2 cam_uv = camera / res;\n"
     "    \n"
-    "    vec2 center = clamp(m_uv, vec2(0.5 / zoom), vec2(1.0 - 0.5 / zoom));\n"
+    "    vec2 center = clamp(cam_uv, vec2(0.5 / zoom), vec2(1.0 - 0.5 / zoom));\n"
     "    vec2 zoomed_uv = center + (uv - vec2(0.5)) / zoom;\n"
     "    \n"
     "    vec4 color = texture2D(tex, zoomed_uv);\n"
@@ -151,6 +153,7 @@ int main() {
   glUseProgram(shader);
 
   GLint loc_mouse = glGetUniformLocation(shader, "mouse");
+  GLint loc_camera = glGetUniformLocation(shader, "camera");
   GLint loc_res = glGetUniformLocation(shader, "res");
   GLint loc_zoom = glGetUniformLocation(shader, "zoom");
   GLint loc_radius = glGetUniformLocation(shader, "radius");
@@ -263,14 +266,15 @@ int main() {
 
     last_x = root_x;
     last_y = root_y;
-    
+
     last_cam_x = cam_x;
     last_cam_y = cam_y;
 
     current_zoom += (target_zoom - current_zoom) * 0.08f;
     current_radius += (target_radius - current_radius) * 0.15f;
 
-    glUniform2f(loc_mouse, cam_x, cam_y);
+    glUniform2f(loc_camera, cam_x, cam_y);
+    glUniform2f(loc_mouse, (float)root_x, (float)root_y);
     glUniform1f(loc_zoom, current_zoom);
     glUniform1f(loc_radius, current_radius);
 
@@ -292,6 +296,7 @@ int main() {
     glEnd();
 
     glUseProgram(0);
+    glDisable(GL_TEXTURE_2D);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     float half_w = (width / 2.0f) / current_zoom;
@@ -302,7 +307,7 @@ int main() {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    glColor3f(1.0f, 0.2f, 0.2f);
+    glColor3f(1.0f, 0.0f, 0.0f);
     glLineWidth(4.0f);
 
     glBegin(GL_LINE_STRIP);
@@ -314,6 +319,7 @@ int main() {
       glVertex2f(strokes[i].x, strokes[i].y);
     }
     glEnd();
+    glEnable(GL_TEXTURE_2D);
     glUseProgram(shader);
 
     if (wants_save) {
@@ -323,7 +329,7 @@ int main() {
       glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels);
 
       char filename[128];
-      snprintf(filename, sizeof(filename), "/tmp/xfocus_save_%ld.ppm",
+      snprintf(filename, sizeof(filename), "~/xfocus_save_%ld.ppm",
                time(NULL));
       FILE *f = fopen(filename, "wb");
       if (f) {
