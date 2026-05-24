@@ -28,19 +28,18 @@ const char *frag_src =
     "    vec2 uv = gl_TexCoord[0].xy;\n"
     "    vec2 m_uv = mouse / res;\n"
     "    \n"
-    "    // Pull UV coordinates towards the mouse to zoom\n"
-    "    vec2 zoomed_uv = mix(m_uv, uv, 1.0 / zoom);\n"
+    "    vec2 center = clamp(m_uv, vec2(0.5 / zoom), vec2(1.0 - 0.5 / zoom));\n"
+    "    vec2 zoomed_uv = center + (uv - vec2(0.5)) / zoom;\n"
+    "    \n"
     "    vec4 color = texture2D(tex, zoomed_uv);\n"
     "    \n"
-    "    // Calculate distance in real pixels for a perfect circle\n"
     "    float dist = distance(uv * res, mouse);\n"
-    "    \n"
-    "    // Smooth transition from cursor\n"
     "    float mask = smoothstep(radius, radius+50.0, dist);\n"
     "    \n"
-    "    // Darken everything outside the spotlight to 40% brightness\n"
-    "    vec4 dark = color * 0.4;\n"
-    "    gl_FragColor = mix(color, dark, mask);\n"
+    "    vec4 fog = vec4(0.89, 0.89, 0.89, 1.0);\n"
+    "    vec4 outside = mix(color, fog, 0.35); // 35% opacity fog\n"
+    "    \n"
+    "    gl_FragColor = mix(color, outside, mask);\n"
     "}\n";
 
 GLuint compile_shader(const char *vtx, const char *frag) {
@@ -151,7 +150,7 @@ int main() {
 
   float current_zoom = 1.0f;
   float target_zoom = 1.0f;
-  float current_radius = 150.0f;
+  float current_radius = 1920.0f;
   float target_radius = 1920.0f;
 
   XEvent ev;
@@ -169,10 +168,12 @@ int main() {
         if (ev.xbutton.state & ShiftMask) {
           if (ev.xbutton.button == 4) {
             target_radius += 200.0f;
-            if (target_radius > 1920.0f) target_radius = 1920.0f;
+            if (target_radius > 1920.0f)
+              target_radius = 1920.0f;
           } else if (ev.xbutton.button == 5) {
             target_radius -= 200.0f;
-            if (target_radius < 50.0f) target_radius = 50.0f;
+            if (target_radius < 50.0f)
+              target_radius = 50.0f;
           }
         } else {
           if (ev.xbutton.button == 4) {
