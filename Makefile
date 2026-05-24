@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -O2
 LDFLAGS = -lX11 -lXext
 
-TARGET = xspot
+TARGET = xfocus
 SRC = main.c
 OBJ = $(SRC:.c=.o)
 
