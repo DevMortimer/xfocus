@@ -23,6 +23,7 @@ const char *frag_src =
     "uniform vec2 mouse;\n"
     "uniform vec2 res;\n"
     "uniform float zoom;\n"
+    "uniform float radius;\n"
     "void main() {\n"
     "    vec2 uv = gl_TexCoord[0].xy;\n"
     "    vec2 m_uv = mouse / res;\n"
@@ -34,11 +35,11 @@ const char *frag_src =
     "    // Calculate distance in real pixels for a perfect circle\n"
     "    float dist = distance(uv * res, mouse);\n"
     "    \n"
-    "    // Smooth transition between 150px and 200px from cursor\n"
-    "    float mask = smoothstep(150.0, 200.0, dist);\n"
+    "    // Smooth transition from cursor\n"
+    "    float mask = smoothstep(radius, radius+50.0, dist);\n"
     "    \n"
-    "    // Darken everything outside the spotlight to 20% brightness\n"
-    "    vec4 dark = color * 0.2;\n"
+    "    // Darken everything outside the spotlight to 40% brightness\n"
+    "    vec4 dark = color * 0.4;\n"
     "    gl_FragColor = mix(color, dark, mask);\n"
     "}\n";
 
@@ -144,11 +145,14 @@ int main() {
   GLint loc_mouse = glGetUniformLocation(shader, "mouse");
   GLint loc_res = glGetUniformLocation(shader, "res");
   GLint loc_zoom = glGetUniformLocation(shader, "zoom");
+  GLint loc_radius = glGetUniformLocation(shader, "radius");
 
   glUniform2f(loc_res, (float)width, (float)height);
 
   float current_zoom = 1.0f;
   float target_zoom = 1.0f;
+  float current_radius = 150.0f;
+  float target_radius = 1920.0f;
 
   XEvent ev;
   int running = 1;
@@ -162,12 +166,24 @@ int main() {
           running = 0;
         }
       } else if (ev.type == ButtonPress) {
-        if (ev.xbutton.button == 4) {
-          target_zoom += 0.5f;
-          if (target_zoom > 10.0f) target_zoom = 10.0f;
-        } else if (ev.xbutton.button == 5) {
-          target_zoom -= 0.3f;
-          if (target_zoom < 1.0f) target_zoom = 1.0f;
+        if (ev.xbutton.state & ShiftMask) {
+          if (ev.xbutton.button == 4) {
+            target_radius += 200.0f;
+            if (target_radius > 1920.0f) target_radius = 1920.0f;
+          } else if (ev.xbutton.button == 5) {
+            target_radius -= 200.0f;
+            if (target_radius < 50.0f) target_radius = 50.0f;
+          }
+        } else {
+          if (ev.xbutton.button == 4) {
+            target_zoom += 0.5f;
+            if (target_zoom > 10.0f)
+              target_zoom = 10.0f;
+          } else if (ev.xbutton.button == 5) {
+            target_zoom -= 0.3f;
+            if (target_zoom < 1.0f)
+              target_zoom = 1.0f;
+          }
         }
       }
     }
@@ -179,9 +195,11 @@ int main() {
                   &win_y, &mask);
 
     current_zoom += (target_zoom - current_zoom) * 0.08f;
+    current_radius += (target_radius - current_radius) * 0.15f;
 
     glUniform2f(loc_mouse, (float)root_x, (float)root_y);
     glUniform1f(loc_zoom, current_zoom);
+    glUniform1f(loc_radius, current_radius);
 
     glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS);
