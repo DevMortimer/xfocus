@@ -1,15 +1,24 @@
+
 #define GL_GLEXT_PROTOTYPES 1
+#define MAX_POINTS 100000
 
 #include <GL/gl.h>
+#include <GL/glext.h>
 #include <GL/glx.h>
 #include <X11/X.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/XShm.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/shm.h>
 #include <time.h>
+
+typedef struct {
+  float x, y;
+  int start;
+} Point;
 
 const char *vtx_src = "#version 120\n"
                       "void main() {\n"
@@ -153,17 +162,32 @@ int main() {
   float current_radius = 1920.0f;
   float target_radius = 1920.0f;
 
+  int is_frozen = 0;
+  float cam_x = width / 2.0f;
+  float cam_y = height / 2.0f;
+
+  // for drawing
+  Point *strokes = malloc(sizeof(Point) * MAX_POINTS);
+  int num_points = 0;
+  int was_drawing = 0;
+  int wants_save = 0;
+  float last_cam_x = -1, last_cam_y = -1;
+
   XEvent ev;
-  int running = 1;
+  int last_x = -1, last_y = -1, running = 1;
   while (running) {
     while (XPending(d)) {
       XNextEvent(d, &ev);
       if (ev.type == KeyPress) {
         KeySym key = XKeycodeToKeysym(d, ev.xkey.keycode, 0);
 
-        if (key == XK_q || key == XK_Escape) {
+        if (key == XK_q || key == XK_Escape)
           running = 0;
-        }
+        if (key == XK_f)
+          is_frozen = !is_frozen;
+        if (key == XK_s)
+          wants_save = 1;
+
       } else if (ev.type == ButtonPress) {
         if (ev.xbutton.state & ShiftMask) {
           if (ev.xbutton.button == 4) {
@@ -195,12 +219,65 @@ int main() {
     XQueryPointer(d, root, &root_ret, &child_ret, &root_x, &root_y, &win_x,
                   &win_y, &mask);
 
+    if (!is_frozen) {
+      cam_x += (root_x - cam_x) * 0.15f;
+      cam_y += (root_y - cam_y) * 0.15f;
+    }
+
+    float cx = cam_x / width;
+    float cy = cam_y / height;
+    float min_c = 0.5f / current_zoom;
+    float max_c = 1.0f - min_c;
+    if (cx < min_c)
+      cx = min_c;
+    if (cx > max_c)
+      cx = max_c;
+    if (cy < min_c)
+      cy = min_c;
+    if (cy > max_c)
+      cy = max_c;
+
+    float actual_cam_x = cx * width;
+    float actual_cam_y = cy * height;
+
+    int is_drawing = (mask & Button1Mask) ? 1 : 0;
+    if (is_drawing && num_points < MAX_POINTS) {
+      float world_x = actual_cam_x + (root_x - width / 2.0f) / current_zoom;
+      float world_y = actual_cam_y + (root_y - height / 2.0f) / current_zoom;
+
+      strokes[num_points].x = world_x;
+      strokes[num_points].y = world_y;
+      strokes[num_points].start = !was_drawing;
+      num_points++;
+    }
+    was_drawing = is_drawing;
+
+    // save some cpu cycles
+    if (fabs(current_zoom - target_zoom) < 0.001f &&
+        fabs(current_radius - target_radius) < 0.001f && root_x == last_x &&
+        root_y == last_y && !is_drawing && !wants_save && XPending(d) == 0) {
+      struct timespec ts = {0, 16000000L};
+      nanosleep(&ts, NULL);
+      continue;
+    }
+
+    last_x = root_x;
+    last_y = root_y;
+    
+    last_cam_x = cam_x;
+    last_cam_y = cam_y;
+
     current_zoom += (target_zoom - current_zoom) * 0.08f;
     current_radius += (target_radius - current_radius) * 0.15f;
 
-    glUniform2f(loc_mouse, (float)root_x, (float)root_y);
+    glUniform2f(loc_mouse, cam_x, cam_y);
     glUniform1f(loc_zoom, current_zoom);
     glUniform1f(loc_radius, current_radius);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
 
     glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS);
@@ -213,6 +290,52 @@ int main() {
     glTexCoord2f(0.0f, 0.0f);
     glVertex2d(-1.0f, 1.0f);
     glEnd();
+
+    glUseProgram(0);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    float half_w = (width / 2.0f) / current_zoom;
+    float half_h = (height / 2.0f) / current_zoom;
+
+    glOrtho(actual_cam_x - half_w, actual_cam_x + half_w, actual_cam_y + half_h,
+            actual_cam_y - half_h, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    glColor3f(1.0f, 0.2f, 0.2f);
+    glLineWidth(4.0f);
+
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i < num_points; i++) {
+      if (strokes[i].start && i > 0) {
+        glEnd();
+        glBegin(GL_LINE_STRIP);
+      }
+      glVertex2f(strokes[i].x, strokes[i].y);
+    }
+    glEnd();
+    glUseProgram(shader);
+
+    if (wants_save) {
+      wants_save = 0;
+      unsigned char *pixels = malloc(width * height * 3);
+
+      glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+
+      char filename[128];
+      snprintf(filename, sizeof(filename), "/tmp/xfocus_save_%ld.ppm",
+               time(NULL));
+      FILE *f = fopen(filename, "wb");
+      if (f) {
+        fprintf(f, "P6\n%d %d\n255\n", width, height);
+        for (int y = height - 1; y >= 0; y--) {
+          fwrite(pixels + y * width * 3, 3, width, f);
+        }
+        fclose(f);
+        printf("Screenshot saved to %s\n", filename);
+      }
+      free(pixels);
+    }
 
     glXSwapBuffers(d, overlay);
 
