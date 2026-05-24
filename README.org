@@ -1,4 +1,4 @@
-# xfocus
+#+TITLE: xfocus
 
 A zoomer application inspired by Tsoding's [[https://github.com/tsoding/boomer][boomer]].
 
@@ -6,4 +6,8 @@ I wanted to create such an implementation myself (without looking at Tsoding's p
 1. I'll use it myself in day to day recordings
 2. For fun :)
 
-
+* Usage
+#+begin_quote
+scroll - control zoom
+shift + scroll - control spotlight
+#+end_quote
