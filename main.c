@@ -205,8 +205,6 @@ int main() {
         } else {
           if (ev.xbutton.button == 4) {
             target_zoom += 0.5f;
-            if (target_zoom > 10.0f)
-              target_zoom = 10.0f;
           } else if (ev.xbutton.button == 5) {
             target_zoom -= 0.3f;
             if (target_zoom < 1.0f)
