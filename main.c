@@ -34,23 +34,66 @@ const char *frag_src =
     "uniform vec2 res;\n"
     "uniform float zoom;\n"
     "uniform float radius;\n"
+    "uniform float time;\n"
+    "\n"
+    "// Simple random hash for particles\n"
+    "float hash(vec2 p) {\n"
+    "    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);\n"
+    "}\n"
+    "\n"
     "void main() {\n"
     "    vec2 uv = gl_TexCoord[0].xy;\n"
-    "    vec2 m_uv = mouse / res;\n"
     "    vec2 cam_uv = camera / res;\n"
     "    \n"
-    "    vec2 center = clamp(cam_uv, vec2(0.5 / zoom), vec2(1.0 - 0.5 / zoom));\n"
-    "    vec2 zoomed_uv = center + (uv - vec2(0.5)) / zoom;\n"
+    "    // UNBOUNDED: Let the camera roam free!\n"
+    "    vec2 zoomed_uv = cam_uv + (uv - vec2(0.5)) / zoom;\n"
     "    \n"
-    "    vec4 color = texture2D(tex, zoomed_uv);\n"
+    "    // Check if we are inside the image\n"
+    "    bool in_bounds = (zoomed_uv.x >= 0.0 && zoomed_uv.x <= 1.0 &&\n"
+    "                      zoomed_uv.y >= 0.0 && zoomed_uv.y <= 1.0);\n"
     "    \n"
-    "    float dist = distance(uv * res, mouse);\n"
-    "    float mask = smoothstep(radius, radius+50.0, dist);\n"
-    "    \n"
-    "    vec4 fog = vec4(0.89, 0.89, 0.89, 1.0);\n"
-    "    vec4 outside = mix(color, fog, 0.35); // 35% opacity fog\n"
-    "    \n"
-    "    gl_FragColor = mix(color, outside, mask);\n"
+    "    if (in_bounds) {\n"
+    "        // Normal image rendering\n"
+    "        vec4 color = texture2D(tex, zoomed_uv);\n"
+    "        float dist = distance(uv * res, mouse);\n"
+    "        float mask = smoothstep(radius, radius+50.0, dist);\n"
+    "        vec4 fog = vec4(0.89, 0.89, 0.89, 1.0);\n"
+    "        vec4 outside = mix(color, fog, 0.35);\n"
+    "        gl_FragColor = mix(color, outside, mask);\n"
+"    } else {\n"
+    "        // COSMIC DUST VOID\n"
+    "        vec2 uv_dust = zoomed_uv * zoom * 1.5;\n"
+    "        vec3 dust_color = vec3(0.0);\n"
+    "        \n"
+    "        // 3 layers of parallax dust\n"
+    "        for(float i = 1.0; i <= 3.0; i++) {\n"
+    "            vec2 p = uv_dust * (i * 1.5);\n"
+    "            p.y -= time * 0.05 * i; // Drift upwards\n"
+    "            p.x += sin(time * 0.05 + p.y) * 0.5; // Organic sway\n"
+    "            \n"
+    "            vec2 id = floor(p);\n"
+    "            vec2 local = fract(p) - 0.5;\n"
+    "            float h = hash(id * i);\n"
+    "            \n"
+    "            // Random twinkle and size based on hash\n"
+    "            float size = 0.02 + h * 0.06;\n"
+    "            float twinkle = 0.5 + 0.5 * sin(time * 2.0 + h * 10.0);\n"
+    "            \n"
+    "            // Inverse square distance for glowing dust particle\n"
+    "            float dist = length(local);\n"
+    "            float particle = (size / (dist + 0.001)) * smoothstep(0.5, 0.0, dist);\n"
+    "            \n"
+    "            // Cosmic color palette (purples, blues, cyan)\n"
+    "            vec3 col = vec3(0.3 + h*0.4, 0.4 + h*0.3, 0.8 + h*0.2);\n"
+    "            \n"
+    "            // Add layer to total color, fading out distant layers\n"
+    "            dust_color += particle * twinkle * col * (1.0 / i);\n"
+    "        }\n"
+    "        \n"
+    "        // Deep space background\n"
+    "        vec3 bg = vec3(0.03, 0.02, 0.06);\n"
+    "        gl_FragColor = vec4(bg + dust_color, 1.0);\n"
+    "    }\n"
     "}\n";
 
 GLuint compile_shader(const char *vtx, const char *frag) {
@@ -157,6 +200,7 @@ int main() {
   GLint loc_res = glGetUniformLocation(shader, "res");
   GLint loc_zoom = glGetUniformLocation(shader, "zoom");
   GLint loc_radius = glGetUniformLocation(shader, "radius");
+  GLint loc_time = glGetUniformLocation(shader, "time");
 
   glUniform2f(loc_res, (float)width, (float)height);
 
@@ -176,6 +220,7 @@ int main() {
   int wants_save = 0;
   float last_cam_x = -1, last_cam_y = -1;
 
+  float time_val = 0.0f;
   XEvent ev;
   int last_x = -1, last_y = -1, running = 1;
   while (running) {
@@ -207,8 +252,8 @@ int main() {
             target_zoom += 0.5f;
           } else if (ev.xbutton.button == 5) {
             target_zoom -= 0.3f;
-            if (target_zoom < 1.0f)
-              target_zoom = 1.0f;
+            if (target_zoom < 0.1f)
+              target_zoom = 0.1f;
           }
         }
       }
@@ -227,16 +272,6 @@ int main() {
 
     float cx = cam_x / width;
     float cy = cam_y / height;
-    float min_c = 0.5f / current_zoom;
-    float max_c = 1.0f - min_c;
-    if (cx < min_c)
-      cx = min_c;
-    if (cx > max_c)
-      cx = max_c;
-    if (cy < min_c)
-      cy = min_c;
-    if (cy > max_c)
-      cy = max_c;
 
     float actual_cam_x = cx * width;
     float actual_cam_y = cy * height;
@@ -253,15 +288,6 @@ int main() {
     }
     was_drawing = is_drawing;
 
-    // save some cpu cycles
-    if (fabs(current_zoom - target_zoom) < 0.001f &&
-        fabs(current_radius - target_radius) < 0.001f && root_x == last_x &&
-        root_y == last_y && !is_drawing && !wants_save && XPending(d) == 0) {
-      struct timespec ts = {0, 16000000L};
-      nanosleep(&ts, NULL);
-      continue;
-    }
-
     last_x = root_x;
     last_y = root_y;
 
@@ -271,10 +297,13 @@ int main() {
     current_zoom += (target_zoom - current_zoom) * 0.08f;
     current_radius += (target_radius - current_radius) * 0.15f;
 
+    time_val += 0.016f; // ~60fps
+
     glUniform2f(loc_camera, cam_x, cam_y);
     glUniform2f(loc_mouse, (float)root_x, (float)root_y);
     glUniform1f(loc_zoom, current_zoom);
     glUniform1f(loc_radius, current_radius);
+    glUniform1f(loc_time, time_val);
 
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
@@ -327,8 +356,8 @@ int main() {
       glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels);
 
       char filename[128];
-      snprintf(filename, sizeof(filename), "~/xfocus_save_%ld.ppm",
-               time(NULL));
+      const char *home = getenv("HOME");
+      snprintf(filename, sizeof(filename), "%s/xfocus_save_%ld.ppm", home ? home : ".", time(NULL));
       FILE *f = fopen(filename, "wb");
       if (f) {
         fprintf(f, "P6\n%d %d\n255\n", width, height);
