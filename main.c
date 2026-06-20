@@ -7,9 +7,12 @@
 #include <GL/glx.h>
 #include <X11/X.h>
 #include <X11/Xlib.h>
+#include <X11/keysym.h>
 #include <X11/Xutil.h>
+#include <X11/extensions/Xinerama.h>
 #include <X11/extensions/XShm.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/shm.h>
@@ -20,13 +23,18 @@ typedef struct {
   int start;
 } Point;
 
-const char *vtx_src = "#version 120\n"
-                      "void main() {\n"
-                      "    gl_TexCoord[0] = gl_MultiTexCoord0;\n"
-                      "    gl_Position = ftransform();\n"
-                      "}\n";
+typedef struct {
+  int x, y;
+  int width, height;
+} Monitor;
 
-const char *frag_src =
+static const char *vtx_src = "#version 120\n"
+                             "void main() {\n"
+                             "    gl_TexCoord[0] = gl_MultiTexCoord0;\n"
+                             "    gl_Position = ftransform();\n"
+                             "}\n";
+
+static const char *frag_src =
     "#version 120\n"
     "uniform sampler2D tex;\n"
     "uniform vec2 camera;\n"
@@ -36,9 +44,99 @@ const char *frag_src =
     "uniform float radius;\n"
     "uniform float time;\n"
     "\n"
-    "// Simple random hash for particles\n"
     "float hash(vec2 p) {\n"
     "    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);\n"
+    "}\n"
+    "\n"
+    "vec2 hash2(vec2 p) {\n"
+    "    return vec2(hash(p), hash(p + 37.17));\n"
+    "}\n"
+    "\n"
+    "float noise(vec2 p) {\n"
+    "    vec2 i = floor(p);\n"
+    "    vec2 f = fract(p);\n"
+    "    f = f * f * (3.0 - 2.0 * f);\n"
+    "    float a = hash(i);\n"
+    "    float b = hash(i + vec2(1.0, 0.0));\n"
+    "    float c = hash(i + vec2(0.0, 1.0));\n"
+    "    float d = hash(i + vec2(1.0, 1.0));\n"
+    "    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n"
+    "}\n"
+    "\n"
+    "float fbm(vec2 p) {\n"
+    "    float value = 0.0;\n"
+    "    float amp = 0.5;\n"
+    "    mat2 spin = mat2(1.62, 1.18, -1.18, 1.62);\n"
+    "    for (int i = 0; i < 5; i++) {\n"
+    "        value += amp * noise(p);\n"
+    "        p = spin * p + vec2(12.7, 8.3);\n"
+    "        amp *= 0.52;\n"
+    "    }\n"
+    "    return value;\n"
+    "}\n"
+    "\n"
+    "vec3 star_layer(vec2 p, float scale, float speed, float size) {\n"
+    "    vec2 grid = p * scale;\n"
+    "    vec2 id = floor(grid);\n"
+    "    vec2 cell = fract(grid) - 0.5;\n"
+    "    vec2 jitter = hash2(id) - 0.5;\n"
+    "    vec2 pos = cell - jitter * 0.62;\n"
+    "    float h = hash(id + scale);\n"
+    "    float rare = smoothstep(0.76, 0.99, h);\n"
+    "    float dist = length(pos);\n"
+    "    float twinkle = 0.72 + 0.28 * sin(time * speed + h * 43.0);\n"
+    "    float core = smoothstep(size, 0.0, dist);\n"
+    "    float halo = smoothstep(size * 8.0, 0.0, dist) * 0.18;\n"
+    "    float cross = smoothstep(size * 0.55, 0.0, abs(pos.x)) *\n"
+    "                  smoothstep(size * 9.0, 0.0, abs(pos.y));\n"
+    "    cross += smoothstep(size * 0.55, 0.0, abs(pos.y)) *\n"
+    "             smoothstep(size * 7.0, 0.0, abs(pos.x));\n"
+    "    vec3 cold = vec3(0.62, 0.82, 1.0);\n"
+    "    vec3 warm = vec3(1.0, 0.78, 0.54);\n"
+    "    vec3 tint = mix(cold, warm, smoothstep(0.78, 1.0, hash(id + 19.4)));\n"
+    "    return tint * rare * twinkle * (core * 1.8 + halo + cross * 0.16);\n"
+    "}\n"
+    "\n"
+    "vec3 comet_layer(vec2 p) {\n"
+    "    vec2 grid = p * 5.0;\n"
+    "    vec2 id = floor(grid);\n"
+    "    vec2 cell = fract(grid) - 0.5;\n"
+    "    float h = hash(id * 2.31);\n"
+    "    float rare = smoothstep(0.965, 1.0, h);\n"
+    "    cell.x += sin(time * 0.12 + h * 12.0) * 0.22;\n"
+    "    cell.y += cos(time * 0.09 + h * 19.0) * 0.08;\n"
+    "    float streak = exp(-abs(cell.y) * 45.0) * exp(-abs(cell.x) * 7.0);\n"
+    "    float head = smoothstep(0.08, 0.0, length(cell + vec2(0.28, 0.0)));\n"
+    "    return vec3(0.48, 0.72, 1.0) * rare * (streak * 0.18 + head * 1.35);\n"
+    "}\n"
+    "\n"
+    "vec3 void_color(vec2 uv, vec2 zoomed_uv) {\n"
+    "    float aspect = res.x / res.y;\n"
+    "    vec2 p = (zoomed_uv - 0.5) * vec2(aspect, 1.0) * zoom;\n"
+    "    vec2 drift = vec2(time * 0.018, -time * 0.012);\n"
+    "    vec2 flow = vec2(fbm(p * 0.55 + vec2(time * 0.018, 4.1)),\n"
+    "                     fbm(p * 0.55 + vec2(9.2, -time * 0.016))) - 0.5;\n"
+    "    vec2 q = p + flow * 1.1;\n"
+    "    float veil = fbm(q * 1.15 + time * 0.018);\n"
+    "    float filament = fbm(q * 3.6 - time * 0.025);\n"
+    "    float nebula = pow(smoothstep(0.44, 1.0, veil * 0.82 + filament * 0.42), 2.2);\n"
+    "    vec3 deep = mix(vec3(0.004, 0.006, 0.014), vec3(0.018, 0.014, 0.038), veil);\n"
+    "    vec3 gas_a = vec3(0.02, 0.24, 0.34);\n"
+    "    vec3 gas_b = vec3(0.38, 0.06, 0.28);\n"
+    "    vec3 gas = mix(gas_a, gas_b, fbm(q * 0.72 + 13.0));\n"
+    "    vec3 stars = vec3(0.0);\n"
+    "    stars += star_layer(p + drift * 0.20, 28.0, 1.1, 0.055);\n"
+    "    stars += star_layer(p * 1.35 - drift * 0.35, 52.0, 1.8, 0.038);\n"
+    "    stars += star_layer(p * 2.10 + drift * 0.70, 90.0, 2.7, 0.026) * 0.72;\n"
+    "    stars += comet_layer(p + flow * 0.2);\n"
+    "    vec2 clamped = clamp(zoomed_uv, vec2(0.0), vec2(1.0));\n"
+    "    float edge_dist = length((zoomed_uv - clamped) * res);\n"
+    "    float edge_glow = exp(-edge_dist / 72.0);\n"
+    "    vec2 centered_uv = (uv - 0.5) * vec2(aspect, 1.0);\n"
+    "    float vignette = smoothstep(1.15, 0.18, length(centered_uv));\n"
+    "    vec3 color = deep + gas * nebula * 0.72 + stars;\n"
+    "    color += vec3(0.16, 0.46, 0.95) * edge_glow * 0.26;\n"
+    "    return color * (0.62 + vignette * 0.55);\n"
     "}\n"
     "\n"
     "void main() {\n"
@@ -60,56 +158,110 @@ const char *frag_src =
     "        vec4 fog = vec4(0.89, 0.89, 0.89, 1.0);\n"
     "        vec4 outside = mix(color, fog, 0.35);\n"
     "        gl_FragColor = mix(color, outside, mask);\n"
-"    } else {\n"
-    "        // COSMIC DUST VOID\n"
-    "        vec2 uv_dust = zoomed_uv * zoom * 1.5;\n"
-    "        vec3 dust_color = vec3(0.0);\n"
-    "        \n"
-    "        // 3 layers of parallax dust\n"
-    "        for(float i = 1.0; i <= 3.0; i++) {\n"
-    "            vec2 p = uv_dust * (i * 1.5);\n"
-    "            p.y -= time * 0.05 * i; // Drift upwards\n"
-    "            p.x += sin(time * 0.05 + p.y) * 0.5; // Organic sway\n"
-    "            \n"
-    "            vec2 id = floor(p);\n"
-    "            vec2 local = fract(p) - 0.5;\n"
-    "            float h = hash(id * i);\n"
-    "            \n"
-    "            // Random twinkle and size based on hash\n"
-    "            float size = 0.02 + h * 0.06;\n"
-    "            float twinkle = 0.5 + 0.5 * sin(time * 2.0 + h * 10.0);\n"
-    "            \n"
-    "            // Inverse square distance for glowing dust particle\n"
-    "            float dist = length(local);\n"
-    "            float particle = (size / (dist + 0.001)) * smoothstep(0.5, 0.0, dist);\n"
-    "            \n"
-    "            // Cosmic color palette (purples, blues, cyan)\n"
-    "            vec3 col = vec3(0.3 + h*0.4, 0.4 + h*0.3, 0.8 + h*0.2);\n"
-    "            \n"
-    "            // Add layer to total color, fading out distant layers\n"
-    "            dust_color += particle * twinkle * col * (1.0 / i);\n"
-    "        }\n"
-    "        \n"
-    "        // Deep space background\n"
-    "        vec3 bg = vec3(0.03, 0.02, 0.06);\n"
-    "        gl_FragColor = vec4(bg + dust_color, 1.0);\n"
+    "    } else {\n"
+    "        vec3 color = void_color(uv, zoomed_uv);\n"
+    "        gl_FragColor = vec4(color, 1.0);\n"
     "    }\n"
     "}\n";
 
-GLuint compile_shader(const char *vtx, const char *frag) {
+static int check_shader(GLuint shader, const char *label) {
+  GLint ok = GL_FALSE;
+  glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+  if (ok)
+    return 1;
+
+  GLchar log[4096];
+  GLsizei len = 0;
+  glGetShaderInfoLog(shader, sizeof(log), &len, log);
+  fprintf(stderr, "%s shader compilation failed:\n%.*s\n", label, len, log);
+  return 0;
+}
+
+static int check_program(GLuint program) {
+  GLint ok = GL_FALSE;
+  glGetProgramiv(program, GL_LINK_STATUS, &ok);
+  if (ok)
+    return 1;
+
+  GLchar log[4096];
+  GLsizei len = 0;
+  glGetProgramInfoLog(program, sizeof(log), &len, log);
+  fprintf(stderr, "Shader program link failed:\n%.*s\n", len, log);
+  return 0;
+}
+
+static GLuint compile_shader(const char *vtx, const char *frag) {
   GLuint vs = glCreateShader(GL_VERTEX_SHADER);
   glShaderSource(vs, 1, &vtx, NULL);
   glCompileShader(vs);
+  if (!check_shader(vs, "Vertex")) {
+    glDeleteShader(vs);
+    return 0;
+  }
 
   GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
   glShaderSource(fs, 1, &frag, NULL);
   glCompileShader(fs);
+  if (!check_shader(fs, "Fragment")) {
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return 0;
+  }
 
   GLuint prog = glCreateProgram();
   glAttachShader(prog, vs);
   glAttachShader(prog, fs);
   glLinkProgram(prog);
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+
+  if (!check_program(prog)) {
+    glDeleteProgram(prog);
+    return 0;
+  }
+
   return prog;
+}
+
+static Monitor current_monitor(Display *d, Window root, int root_width,
+                               int root_height) {
+  Monitor monitor = {0, 0, root_width, root_height};
+
+  Window root_ret, child_ret;
+  int root_x, root_y, win_x, win_y;
+  unsigned int mask;
+  if (!XQueryPointer(d, root, &root_ret, &child_ret, &root_x, &root_y, &win_x,
+                     &win_y, &mask)) {
+    return monitor;
+  }
+
+  int event_base, error_base;
+  if (!XineramaQueryExtension(d, &event_base, &error_base) ||
+      !XineramaIsActive(d)) {
+    return monitor;
+  }
+
+  int screen_count = 0;
+  XineramaScreenInfo *screens = XineramaQueryScreens(d, &screen_count);
+  if (!screens)
+    return monitor;
+
+  for (int i = 0; i < screen_count; i++) {
+    int x = screens[i].x_org;
+    int y = screens[i].y_org;
+    int w = screens[i].width;
+    int h = screens[i].height;
+    if (root_x >= x && root_x < x + w && root_y >= y && root_y < y + h) {
+      monitor.x = x;
+      monitor.y = y;
+      monitor.width = w;
+      monitor.height = h;
+      break;
+    }
+  }
+
+  XFree(screens);
+  return monitor;
 }
 
 int main() {
@@ -124,7 +276,8 @@ int main() {
 
   XWindowAttributes wa;
   XGetWindowAttributes(d, root, &wa);
-  int width = wa.width, height = wa.height;
+  Monitor monitor = current_monitor(d, root, wa.width, wa.height);
+  int width = monitor.width, height = monitor.height;
 
   GLint att[] = {GLX_RGBA, GLX_DEPTH_SIZE, 24, GLX_DOUBLEBUFFER, None};
   XVisualInfo *vi = glXChooseVisual(d, 0, att);
@@ -146,40 +299,68 @@ int main() {
     exit(1);
   }
 
-  XShmSegmentInfo shminfo;
+  XShmSegmentInfo shminfo = {0};
   XImage *img =
       XShmCreateImage(d, DefaultVisual(d, screen), DefaultDepth(d, screen),
                       ZPixmap, NULL, &shminfo, width, height);
+  if (!img) {
+    fprintf(stderr, "Failed to create XShm image\n");
+    exit(1);
+  }
 
   shminfo.shmid =
       shmget(IPC_PRIVATE, img->bytes_per_line * img->height, IPC_CREAT | 0777);
 
   if (shminfo.shmid < 0) {
-    fprintf(stderr, "Failed to allocate shared memory\n");
+    perror("shmget");
+    XDestroyImage(img);
     exit(1);
   }
 
-  shminfo.shmaddr = img->data = (char *)shmat(shminfo.shmid, 0, 0);
+  shminfo.shmaddr = (char *)shmat(shminfo.shmid, 0, 0);
+  if (shminfo.shmaddr == (char *)-1) {
+    perror("shmat");
+    shmctl(shminfo.shmid, IPC_RMID, 0);
+    XDestroyImage(img);
+    exit(1);
+  }
+
+  img->data = shminfo.shmaddr;
   shminfo.readOnly = False;
 
-  XShmAttach(d, &shminfo);
+  if (!XShmAttach(d, &shminfo)) {
+    fprintf(stderr, "Failed to attach XShm segment\n");
+    shmdt(shminfo.shmaddr);
+    shmctl(shminfo.shmid, IPC_RMID, 0);
+    XDestroyImage(img);
+    exit(1);
+  }
   shmctl(shminfo.shmid, IPC_RMID, 0);
 
-  XShmGetImage(d, root, img, 0, 0, AllPlanes);
+  if (!XShmGetImage(d, root, img, monitor.x, monitor.y, AllPlanes)) {
+    fprintf(stderr, "Failed to capture root window\n");
+    XShmDetach(d, &shminfo);
+    XDestroyImage(img);
+    shmdt(shminfo.shmaddr);
+    exit(1);
+  }
 
   Window overlay = XCreateWindow(
-      d, root, 0, 0, width, height, 0, vi->depth, InputOutput, vi->visual,
+      d, root, monitor.x, monitor.y, width, height, 0, vi->depth, InputOutput,
+      vi->visual,
       CWOverrideRedirect | CWColormap | CWEventMask | CWBorderPixel, &attr);
   XMapWindow(d, overlay);
 
   GLXContext glc = glXCreateContext(d, vi, NULL, GL_TRUE);
-  glXMakeCurrent(d, overlay, glc);
-
-  while (XGrabKeyboard(d, overlay, 1, GrabModeAsync, GrabModeAsync,
-                       CurrentTime) != GrabSuccess) {
-    struct timespec ts = {0, 10000000L};
-    nanosleep(&ts, NULL);
+  if (!glc) {
+    fprintf(stderr, "Failed to create GLX context\n");
+    XDestroyWindow(d, overlay);
+    XShmDetach(d, &shminfo);
+    XDestroyImage(img);
+    shmdt(shminfo.shmaddr);
+    exit(1);
   }
+  glXMakeCurrent(d, overlay, glc);
 
   GLuint texture;
   glGenTextures(1, &texture);
@@ -193,6 +374,10 @@ int main() {
   glEnable(GL_TEXTURE_2D);
 
   GLuint shader = compile_shader(vtx_src, frag_src);
+  if (!shader) {
+    fprintf(stderr, "Failed to create shader program\n");
+    exit(1);
+  }
   glUseProgram(shader);
 
   GLint loc_mouse = glGetUniformLocation(shader, "mouse");
@@ -215,19 +400,28 @@ int main() {
 
   // for drawing
   Point *strokes = malloc(sizeof(Point) * MAX_POINTS);
+  if (!strokes) {
+    fprintf(stderr, "Failed to allocate drawing buffer\n");
+    exit(1);
+  }
   int num_points = 0;
   int was_drawing = 0;
   int wants_save = 0;
-  float last_cam_x = -1, last_cam_y = -1;
+
+  while (XGrabKeyboard(d, overlay, 1, GrabModeAsync, GrabModeAsync,
+                       CurrentTime) != GrabSuccess) {
+    struct timespec ts = {0, 10000000L};
+    nanosleep(&ts, NULL);
+  }
 
   float time_val = 0.0f;
   XEvent ev;
-  int last_x = -1, last_y = -1, running = 1;
+  int running = 1;
   while (running) {
     while (XPending(d)) {
       XNextEvent(d, &ev);
       if (ev.type == KeyPress) {
-        KeySym key = XKeycodeToKeysym(d, ev.xkey.keycode, 0);
+        KeySym key = XLookupKeysym(&ev.xkey, 0);
 
         if (key == XK_q || key == XK_Escape)
           running = 0;
@@ -235,6 +429,19 @@ int main() {
           is_frozen = !is_frozen;
         if (key == XK_s)
           wants_save = 1;
+        if (key == XK_c) {
+          num_points = 0;
+          was_drawing = 0;
+        }
+        if (key == XK_r) {
+          target_zoom = 1.0f;
+          current_zoom = 1.0f;
+          target_radius = 1920.0f;
+          current_radius = 1920.0f;
+          is_frozen = 0;
+          cam_x = width / 2.0f;
+          cam_y = height / 2.0f;
+        }
 
       } else if (ev.type == ButtonPress) {
         if (ev.xbutton.state & ShiftMask) {
@@ -264,10 +471,12 @@ int main() {
     unsigned int mask;
     XQueryPointer(d, root, &root_ret, &child_ret, &root_x, &root_y, &win_x,
                   &win_y, &mask);
+    int mouse_x = root_x - monitor.x;
+    int mouse_y = root_y - monitor.y;
 
     if (!is_frozen) {
-      cam_x += (root_x - cam_x) * 0.15f;
-      cam_y += (root_y - cam_y) * 0.15f;
+      cam_x += (mouse_x - cam_x) * 0.15f;
+      cam_y += (mouse_y - cam_y) * 0.15f;
     }
 
     float cx = cam_x / width;
@@ -278,8 +487,8 @@ int main() {
 
     int is_drawing = (mask & Button1Mask) ? 1 : 0;
     if (is_drawing && num_points < MAX_POINTS) {
-      float world_x = actual_cam_x + (root_x - width / 2.0f) / current_zoom;
-      float world_y = actual_cam_y + (root_y - height / 2.0f) / current_zoom;
+      float world_x = actual_cam_x + (mouse_x - width / 2.0f) / current_zoom;
+      float world_y = actual_cam_y + (mouse_y - height / 2.0f) / current_zoom;
 
       strokes[num_points].x = world_x;
       strokes[num_points].y = world_y;
@@ -288,19 +497,13 @@ int main() {
     }
     was_drawing = is_drawing;
 
-    last_x = root_x;
-    last_y = root_y;
-
-    last_cam_x = cam_x;
-    last_cam_y = cam_y;
-
     current_zoom += (target_zoom - current_zoom) * 0.08f;
     current_radius += (target_radius - current_radius) * 0.15f;
 
     time_val += 0.016f; // ~60fps
 
     glUniform2f(loc_camera, cam_x, cam_y);
-    glUniform2f(loc_mouse, (float)root_x, (float)root_y);
+    glUniform2f(loc_mouse, (float)mouse_x, (float)mouse_y);
     glUniform1f(loc_zoom, current_zoom);
     glUniform1f(loc_radius, current_radius);
     glUniform1f(loc_time, time_val);
@@ -334,6 +537,26 @@ int main() {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+
+    // Outline of the drawing
+    glColor3f(0.0f, 0.0f, 0.0f);
+    glLineWidth(8.0f); // twice the width of the drawing
+
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i < num_points; i++) {
+      if (strokes[i].start && i > 0) {
+        glEnd();
+        glBegin(GL_LINE_STRIP);
+      }
+      glVertex2f(strokes[i].x, strokes[i].y);
+    }
+    glEnd();
+
+    // The drawing
     glColor3f(1.0f, 0.0f, 0.0f);
     glLineWidth(4.0f);
 
@@ -346,28 +569,48 @@ int main() {
       glVertex2f(strokes[i].x, strokes[i].y);
     }
     glEnd();
+
+    glDisable(GL_LINE_SMOOTH);
+    glDisable(GL_BLEND);
     glEnable(GL_TEXTURE_2D);
     glUseProgram(shader);
 
     if (wants_save) {
       wants_save = 0;
-      unsigned char *pixels = malloc(width * height * 3);
-
-      glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels);
-
-      char filename[128];
-      const char *home = getenv("HOME");
-      snprintf(filename, sizeof(filename), "%s/xfocus_save_%ld.ppm", home ? home : ".", time(NULL));
-      FILE *f = fopen(filename, "wb");
-      if (f) {
-        fprintf(f, "P6\n%d %d\n255\n", width, height);
-        for (int y = height - 1; y >= 0; y--) {
-          fwrite(pixels + y * width * 3, 3, width, f);
+      size_t pixel_count = (size_t)width * (size_t)height;
+      if (pixel_count > SIZE_MAX / 3) {
+        fprintf(stderr, "Screenshot is too large to save\n");
+      } else {
+        unsigned char *pixels = malloc(pixel_count * 3);
+        if (!pixels) {
+          fprintf(stderr, "Failed to allocate screenshot buffer\n");
+          continue;
         }
-        fclose(f);
-        printf("Screenshot saved to %s\n", filename);
+
+        glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+
+        char filename[128];
+        const char *home = getenv("HOME");
+        int written =
+            snprintf(filename, sizeof(filename), "%s/xfocus_save_%ld.ppm",
+                     home ? home : ".", time(NULL));
+        if (written < 0 || (size_t)written >= sizeof(filename)) {
+          fprintf(stderr, "Screenshot path is too long\n");
+        } else {
+          FILE *f = fopen(filename, "wb");
+          if (f) {
+            fprintf(f, "P6\n%d %d\n255\n", width, height);
+            for (int y = height - 1; y >= 0; y--) {
+              fwrite(pixels + y * width * 3, 3, width, f);
+            }
+            fclose(f);
+            printf("Screenshot saved to %s\n", filename);
+          } else {
+            perror("fopen");
+          }
+        }
+        free(pixels);
       }
-      free(pixels);
     }
 
     glXSwapBuffers(d, overlay);
@@ -377,13 +620,18 @@ int main() {
   }
 
   XUngrabKeyboard(d, CurrentTime);
+  glDeleteProgram(shader);
+  glDeleteTextures(1, &texture);
   glXMakeCurrent(d, None, NULL);
   glXDestroyContext(d, glc);
   XDestroyWindow(d, overlay);
   XShmDetach(d, &shminfo);
   XDestroyImage(img);
   shmdt(shminfo.shmaddr);
+  XFreeColormap(d, cmap);
+  XFree(vi);
+  free(strokes);
   XCloseDisplay(d);
 
-  exit(0);
+  return 0;
 }

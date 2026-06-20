@@ -7,9 +7,12 @@ I wanted to create such an implementation myself (without looking at Tsoding's p
 2. For fun :)
 
 * Usage
+xfocus captures the monitor containing the pointer when it starts.
+
 - scroll wheel - control zoom
 - shift + scroll wheel - control spotlight
 - f - toggle screen freeze
 - s - save screenshot
+- c - clear drawing
+- r - reset zoom, spotlight, and freeze state
 - mouse left button - start drawing (when frozen)
-
