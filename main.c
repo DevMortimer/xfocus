@@ -1,6 +1,8 @@
 
 #define GL_GLEXT_PROTOTYPES 1
 #define MAX_POINTS 100000
+#define SMOOTH_STEPS 6
+#define SNAP_ANGLE_STEP 0.78539816339f
 
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -27,6 +29,83 @@ typedef struct {
   int x, y;
   int width, height;
 } Monitor;
+
+static void constrain_line(float anchor_x, float anchor_y, float *x, float *y) {
+  float dx = *x - anchor_x;
+  float dy = *y - anchor_y;
+  float len = sqrtf(dx * dx + dy * dy);
+  if (len < 0.001f)
+    return;
+
+  float angle = atan2f(dy, dx);
+  float snapped = roundf(angle / SNAP_ANGLE_STEP) * SNAP_ANGLE_STEP;
+  *x = anchor_x + cosf(snapped) * len;
+  *y = anchor_y + sinf(snapped) * len;
+}
+
+static float catmull_rom(float p0, float p1, float p2, float p3, float t) {
+  float t2 = t * t;
+  float t3 = t2 * t;
+  return 0.5f * ((2.0f * p1) + (-p0 + p2) * t +
+                 (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
+                 (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+}
+
+static void draw_stroke_range(const Point *strokes, int start, int end) {
+  if (end <= start)
+    return;
+
+  if (end - start < 3) {
+    for (int i = start; i < end; i++) {
+      glVertex2f(strokes[i].x, strokes[i].y);
+    }
+    return;
+  }
+
+  glVertex2f(strokes[start].x, strokes[start].y);
+  for (int i = start; i < end - 1; i++) {
+    Point p0 = strokes[i > start ? i - 1 : i];
+    Point p1 = strokes[i];
+    Point p2 = strokes[i + 1];
+    Point p3 = strokes[i + 2 < end ? i + 2 : i + 1];
+
+    for (int step = 1; step <= SMOOTH_STEPS; step++) {
+      float t = (float)step / (float)SMOOTH_STEPS;
+      float x = catmull_rom(p0.x, p1.x, p2.x, p3.x, t);
+      float y = catmull_rom(p0.y, p1.y, p2.y, p3.y, t);
+      glVertex2f(x, y);
+    }
+  }
+}
+
+static void draw_strokes(const Point *strokes, int num_points, float width,
+                         float r, float g, float b) {
+  glColor3f(r, g, b);
+  glLineWidth(width);
+
+  int start = 0;
+  while (start < num_points) {
+    int end = start + 1;
+    while (end < num_points && !strokes[end].start) {
+      end++;
+    }
+
+    glBegin(GL_LINE_STRIP);
+    draw_stroke_range(strokes, start, end);
+    glEnd();
+
+    start = end;
+  }
+
+  glEnable(GL_POINT_SMOOTH);
+  glPointSize(width);
+  glBegin(GL_POINTS);
+  for (int i = 0; i < num_points; i++) {
+    glVertex2f(strokes[i].x, strokes[i].y);
+  }
+  glEnd();
+  glDisable(GL_POINT_SMOOTH);
+}
 
 static const char *vtx_src = "#version 120\n"
                              "void main() {\n"
@@ -406,6 +485,10 @@ int main() {
   }
   int num_points = 0;
   int was_drawing = 0;
+  int was_straight_drawing = 0;
+  int straight_line_index = -1;
+  float straight_anchor_x = 0.0f;
+  float straight_anchor_y = 0.0f;
   int wants_save = 0;
 
   while (XGrabKeyboard(d, overlay, 1, GrabModeAsync, GrabModeAsync,
@@ -432,6 +515,8 @@ int main() {
         if (key == XK_c) {
           num_points = 0;
           was_drawing = 0;
+          was_straight_drawing = 0;
+          straight_line_index = -1;
         }
         if (key == XK_r) {
           target_zoom = 1.0f;
@@ -439,6 +524,9 @@ int main() {
           target_radius = 1920.0f;
           current_radius = 1920.0f;
           is_frozen = 0;
+          was_drawing = 0;
+          was_straight_drawing = 0;
+          straight_line_index = -1;
           cam_x = width / 2.0f;
           cam_y = height / 2.0f;
         }
@@ -485,17 +573,54 @@ int main() {
     float actual_cam_x = cx * width;
     float actual_cam_y = cy * height;
 
-    int is_drawing = (mask & Button1Mask) ? 1 : 0;
-    if (is_drawing && num_points < MAX_POINTS) {
+    int is_drawing = (is_frozen && (mask & Button1Mask)) ? 1 : 0;
+    int is_straight_drawing = (is_drawing && (mask & ShiftMask)) ? 1 : 0;
+    if (is_drawing) {
       float world_x = actual_cam_x + (mouse_x - width / 2.0f) / current_zoom;
       float world_y = actual_cam_y + (mouse_y - height / 2.0f) / current_zoom;
 
-      strokes[num_points].x = world_x;
-      strokes[num_points].y = world_y;
-      strokes[num_points].start = !was_drawing;
-      num_points++;
+      if (is_straight_drawing) {
+        if (!was_straight_drawing || straight_line_index < 0) {
+          if (num_points <= MAX_POINTS - 2) {
+            if (was_drawing && num_points > 0) {
+              straight_anchor_x = strokes[num_points - 1].x;
+              straight_anchor_y = strokes[num_points - 1].y;
+            } else {
+              straight_anchor_x = world_x;
+              straight_anchor_y = world_y;
+            }
+
+            constrain_line(straight_anchor_x, straight_anchor_y, &world_x,
+                           &world_y);
+            strokes[num_points].x = straight_anchor_x;
+            strokes[num_points].y = straight_anchor_y;
+            strokes[num_points].start = 1;
+            straight_line_index = num_points + 1;
+            strokes[straight_line_index].x = world_x;
+            strokes[straight_line_index].y = world_y;
+            strokes[straight_line_index].start = 0;
+            num_points += 2;
+          }
+        } else {
+          constrain_line(straight_anchor_x, straight_anchor_y, &world_x,
+                         &world_y);
+          strokes[straight_line_index].x = world_x;
+          strokes[straight_line_index].y = world_y;
+        }
+      } else {
+        straight_line_index = -1;
+        if (num_points < MAX_POINTS) {
+          strokes[num_points].x = world_x;
+          strokes[num_points].y = world_y;
+          strokes[num_points].start = !was_drawing || was_straight_drawing;
+          num_points++;
+        }
+      }
+    } else {
+      straight_line_index = -1;
     }
     was_drawing = is_drawing;
+    was_straight_drawing = is_straight_drawing;
 
     current_zoom += (target_zoom - current_zoom) * 0.08f;
     current_radius += (target_radius - current_radius) * 0.15f;
@@ -542,33 +667,8 @@ int main() {
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
 
-    // Outline of the drawing
-    glColor3f(0.0f, 0.0f, 0.0f);
-    glLineWidth(8.0f); // twice the width of the drawing
-
-    glBegin(GL_LINE_STRIP);
-    for (int i = 0; i < num_points; i++) {
-      if (strokes[i].start && i > 0) {
-        glEnd();
-        glBegin(GL_LINE_STRIP);
-      }
-      glVertex2f(strokes[i].x, strokes[i].y);
-    }
-    glEnd();
-
-    // The drawing
-    glColor3f(1.0f, 0.0f, 0.0f);
-    glLineWidth(4.0f);
-
-    glBegin(GL_LINE_STRIP);
-    for (int i = 0; i < num_points; i++) {
-      if (strokes[i].start && i > 0) {
-        glEnd();
-        glBegin(GL_LINE_STRIP);
-      }
-      glVertex2f(strokes[i].x, strokes[i].y);
-    }
-    glEnd();
+    draw_strokes(strokes, num_points, 8.0f, 0.0f, 0.0f, 0.0f);
+    draw_strokes(strokes, num_points, 4.0f, 1.0f, 0.0f, 0.0f);
 
     glDisable(GL_LINE_SMOOTH);
     glDisable(GL_BLEND);

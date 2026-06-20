@@ -16,3 +16,4 @@ xfocus captures the monitor containing the pointer when it starts.
 - c - clear drawing
 - r - reset zoom, spotlight, and freeze state
 - mouse left button - start drawing (when frozen)
+- shift + mouse left button - draw a straight line, snapped to 45-degree angles
